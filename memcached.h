@@ -22,6 +22,7 @@
 #include "cache.h"
 
 #include "sasl_defs.h"
+#include "mtcp_api.h"
 
 /** Maximum length of a key. */
 #define KEY_MAX_LENGTH 250
@@ -419,6 +420,7 @@ typedef struct {
  */
 typedef struct conn conn;
 struct conn {
+    mctx_t mctx;
     int    sfd;
     sasl_conn_t *sasl_conn;
     bool authenticated;
@@ -538,7 +540,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key,
                                     const int64_t delta, char *buf,
                                     uint64_t *cas, const uint32_t hv);
 enum store_item_type do_store_item(item *item, int comm, conn* c, const uint32_t hv);
-conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
+conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base,mctx_t mc);
 extern int daemonize(int nochdir, int noclose);
 
 #define mutex_lock(x) pthread_mutex_lock(x)
@@ -561,7 +563,7 @@ extern int daemonize(int nochdir, int noclose);
 
 void memcached_thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn *c);
-void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags, int read_buffer_size, enum network_transport transport);
+void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags, int read_buffer_size, enum network_transport transport,mctx_t mc);
 
 /* Lock wrappers for cache functions that are called from main loop. */
 enum delta_result_type add_delta(conn *c, const char *key,

@@ -1,8 +1,8 @@
-/* -*- Mode: C; tab-width: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
+/* -*- Mode: C; tab-wideh: 4; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 /*
  * Thread management for memcached.
  */
-#include "memcached.h"
+//#include "memcached.h"
 #include <assert.h>
 #include <stdio.h>
 #include <errno.h>
@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <string.h>
 #include <pthread.h>
+#include "mtcp_api.h"
+#include "memcached.h"
 
 #ifdef __sun
 #include <atomic.h>
@@ -80,6 +82,9 @@ static pthread_cond_t init_cond;
 
 
 static void thread_libevent_process(int fd, short which, void *arg);
+//void set_mctx(struct event_base *base,int core);
+//mctx_t get_mctx(struct event_base *base);
+//void set_mctx_mc(struct event_base *base,mctx_t mc);
 
 unsigned short refcount_incr(unsigned short *refcount) {
 #ifdef HAVE_GCC_ATOMICS
@@ -120,23 +125,23 @@ unsigned short refcount_decr(unsigned short *refcount) {
  */
 
 void item_lock(uint32_t hv) {
-    mutex_lock(&item_locks[hv & hashmask(item_lock_hashpower)]);
+    //mutex_lock(&item_locks[hv & hashmask(item_lock_hashpower)]);
 }
 
 void *item_trylock(uint32_t hv) {
-    pthread_mutex_t *lock = &item_locks[hv & hashmask(item_lock_hashpower)];
+   /* pthread_mutex_t *lock = &item_locks[hv & hashmask(item_lock_hashpower)];
     if (pthread_mutex_trylock(lock) == 0) {
         return lock;
-    }
+    }*/
     return NULL;
 }
 
 void item_trylock_unlock(void *lock) {
-    mutex_unlock((pthread_mutex_t *) lock);
+    //mutex_unlock((pthread_mutex_t *) lock);
 }
 
 void item_unlock(uint32_t hv) {
-    mutex_unlock(&item_locks[hv & hashmask(item_lock_hashpower)]);
+    //mutex_unlock(&item_locks[hv & hashmask(item_lock_hashpower)]);
 }
 
 static void wait_for_thread_registration(int nthreads) {
@@ -327,12 +332,13 @@ void accept_new_conns(const bool do_accept) {
 /*
  * Set up a thread's information.
  */
-static void setup_thread(LIBEVENT_THREAD *me) {
-    me->base = event_init();
+static void setup_thread(LIBEVENT_THREAD *me,mctx_t mc) {
+    me->base = event_init(-1,mc);
     if (! me->base) {
         fprintf(stderr, "Can't allocate event base\n");
         exit(1);
     }
+    //set_mctx_mc(me->base,mc);
 
     /* Listen for notifications from other threads */
     event_set(&me->notify_event, me->notify_receive_fd,
@@ -385,10 +391,12 @@ static void *worker_libevent(void *arg) {
  * Processes an incoming "handle a new connection" item. This is called when
  * input arrives on the libevent wakeup pipe.
  */
+
 static void thread_libevent_process(int fd, short which, void *arg) {
     LIBEVENT_THREAD *me = arg;
     CQ_ITEM *item;
     char buf[1];
+    mctx_t mc = get_mctx(me->base);
 
     if (read(fd, buf, 1) != 1)
         if (settings.verbose > 0)
@@ -397,11 +405,11 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     switch (buf[0]) {
     case 'c':
     item = cq_pop(me->new_conn_queue);
-
-    if (NULL != item) {
+    struct conn *a = (struct conn *)calloc(1,sizeof(struct conn));
+    if (NULL != item) { 
         conn *c = conn_new(item->sfd, item->init_state, item->event_flags,
-                           item->read_buffer_size, item->transport, me->base);
-        if (c == NULL) {
+                           item->read_buffer_size, item->transport,mc,a,1);	
+	if (c == NULL) {
             if (IS_UDP(item->transport)) {
                 fprintf(stderr, "Can't listen for events on UDP socket\n");
                 exit(1);
@@ -410,7 +418,7 @@ static void thread_libevent_process(int fd, short which, void *arg) {
                     fprintf(stderr, "Can't listen for events on fd %d\n",
                         item->sfd);
                 }
-                close(item->sfd);
+                mtcp_close(mc,item->sfd);
             }
         } else {
             c->thread = me;
@@ -434,11 +442,12 @@ static int last_thread = -1;
  * of an incoming connection.
  */
 void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
-                       int read_buffer_size, enum network_transport transport) {
+                       int read_buffer_size, enum network_transport transport,mctx_t mc) {
     CQ_ITEM *item = cqi_new();
+
     char buf[1];
     if (item == NULL) {
-        close(sfd);
+        mtcp_close(mc,sfd);
         /* given that malloc failed this may also fail, but let's try */
         fprintf(stderr, "Failed to allocate memory for connection object\n");
         return ;
@@ -455,7 +464,6 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
     item->event_flags = event_flags;
     item->read_buffer_size = read_buffer_size;
     item->transport = transport;
-
     cq_push(thread->new_conn_queue, item);
 
     MEMCACHED_CONN_DISPATCH(sfd, thread->thread_id);
@@ -590,11 +598,11 @@ enum delta_result_type add_delta(conn *c, const char *key,
 enum store_item_type store_item(item *item, int comm, conn* c) {
     enum store_item_type ret;
     uint32_t hv;
-
+    //printf("in store \n");
     hv = hash(ITEM_key(item), item->nkey);
-    item_lock(hv);
+    //item_lock(hv);
     ret = do_store_item(item, comm, c, hv);
-    item_unlock(hv);
+    //item_unlock(hv);
     return ret;
 }
 
@@ -724,7 +732,7 @@ void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out) {
 void memcached_thread_init(int nthreads, struct event_base *main_base) {
     int         i;
     int         power;
-
+    mctx_t	mc = get_mctx(main_base);
     for (i = 0; i < POWER_LARGEST; i++) {
         pthread_mutex_init(&lru_locks[i], NULL);
     }
@@ -786,7 +794,7 @@ void memcached_thread_init(int nthreads, struct event_base *main_base) {
         threads[i].notify_receive_fd = fds[0];
         threads[i].notify_send_fd = fds[1];
 
-        setup_thread(&threads[i]);
+        setup_thread(&threads[i],mc);
         /* Reserve three fds for the libevent base, and two for the pipe */
         stats.reserved_fds += 5;
     }
